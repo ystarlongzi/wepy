@@ -1,6 +1,7 @@
 const htmlparser = require('htmlparser2');
 const paramsDetect = require('./../../ast/paramsDetect');
 const vueWithTransform = require('vue-template-es2015-compiler');
+const tools = require('../../util/tools');
 
 
 const forAliasRE = /([^]*?)\s+(?:in|of)\s+([^]*)/;
@@ -51,16 +52,23 @@ const parseHandlerProxy = (expr) => {
   let handlerExpr = expr;
 
   if (/^\w+$/.test(expr)) {  //   @tap="doSomething"
-    handlerExpr += '()';
+    injectParams.push('$event');
+    handlerExpr += '($event)';
+  } else {
+    let detected = paramsDetect(handlerExpr);
+
+    if (detected.$event) {
+      injectParams.push('$event');
+    }
+
+    Object.keys(detected).forEach(d => {
+      if (!detected[d].callable) {
+        //injectParams.push(d);
+      }
+    });
   }
 
-  let detected = paramsDetect(handlerExpr);
 
-  Object.keys(detected).forEach(d => {
-    if (!detected[d].callable) {
-      //injectParams.push(d);
-    }
-  });
 
   let proxy = `function proxyHandler (${injectParams.join(', ')}) {
     with (this) {
@@ -133,35 +141,33 @@ exports = module.exports = function () {
         // e.g: v-for="items"
         res.alias = 'item';
         res.for = variableMatch[0].trim();
-        return res;
       }
 
-      if (!inMatch) {
-        return res;
-      }
-      res.for = inMatch[2].trim();
-      let alias = inMatch[1].trim().replace(stripParensRE, '');
-      let iteratorMatch = alias.match(forIteratorRE);
-      if (iteratorMatch) {
-        res.alias = alias.replace(forIteratorRE, '').trim();
-        res.iterator1 = iteratorMatch[1].trim();
-        if (iteratorMatch[2]) {
-          res.iterator2 = iteratorMatch[2].trim();
+      if (inMatch) {
+        res.for = inMatch[2].trim();
+        let alias = inMatch[1].trim().replace(stripParensRE, '');
+        let iteratorMatch = alias.match(forIteratorRE);
+        if (iteratorMatch) {
+          res.alias = alias.replace(forIteratorRE, '').trim();
+          res.iterator1 = iteratorMatch[1].trim();
+          if (iteratorMatch[2]) {
+            res.iterator2 = iteratorMatch[2].trim();
+          }
+        } else {
+          res.alias = alias;
         }
-      } else {
-        res.alias = alias;
       }
       return {
         'wx:for': `{{ ${res.for} }}`,
-        'wx:for-index': `${res.iterator1 || 'index'} `,
-        'wx:for-item': `${res.alias || 'item'} `,
-        'wx:key': `${res.iterator2 || res.iterator1 || 'index'} `
+        'wx:for-index': `${res.iterator1 || 'index'}`,
+        'wx:for-item': `${res.alias || 'item'}`,
+        'wx:key': `${res.iterator2 || res.iterator1 || 'index'}`
       };
     },
-    'v-show': ({item, name, expr}) => ({ hidden: `{{!(${expr})}}` }),
+    'v-show': ({item, name, expr}) => ({ hidden: `{{ !(${expr}) }}` }),
     'v-if': ({item, name, expr}) => ({ 'wx:if': `{{ ${expr} }}` }),
     'v-else-if': ({item, name, expr}) => ({ 'wx:elif': `{{ ${expr} }}` }),
-    'wx:else': ({item, name, expr}) => ({ 'wx:else': `{{ ${expr} }}` })
+    'v-else': ({item, name, expr}) => ({ 'wx:else': true })
   };
 
   for (let name in ATTR_HANDLERS) {
@@ -207,17 +213,22 @@ exports = module.exports = function () {
     return [item, rel];
   });
 
-  this.register('template-parse-ast-tag', function parseAstTag (item) {
+  this.register('template-parse-ast-tag', function parseAstTag (item, rel) {
     let htmlTags = this.tags.htmlTags;
     let wxmlTags = this.tags.wxmlTags;
     let html2wxmlMap = this.tags.html2wxmlMap;
     let logger = this.logger;
 
-    if (html2wxmlMap[item.name]) {  // Tag is in the map list
+    let components = rel.components;
+    if (components[item.name]) { // It's a user defined component
+      logger.silly('tag', `Found user defined component "${item.name}"`);
+      item.attribs = item.attribs || {};
+      item.attribs['bind_init'] = "_initComponent";
+    } else if (html2wxmlMap[item.name]) {  // Tag is in the map list
       logger.silly('html2wxml', `Change "${item.name}" to "${html2wxmlMap[item.name]}"`);
       item.name = html2wxmlMap[item.name];
     } else if (wxmlTags.indexOf(item.name) > -1) { // Tag is a wxml tag
-      
+
     } else if (htmlTags.indexOf(item.name) > -1) { // Tag is a html tag
       logger.silly('html2wxml', `Change "${item.name}" is a html tag, changed to "view"`);
       item.name = 'view';
@@ -225,13 +236,13 @@ exports = module.exports = function () {
       logger.silly('tag', `Assume "${item.name}" is a user defined component`);
     }
 
-    return item;
+    return [item, rel];
   });
 
   this.register('template-parse-ast', function parseAST (ast, rel) {
     ast.forEach(item => {
       if (item.type === 'tag') {
-        item = this.hookSeq('template-parse-ast-tag', item);
+        [item, rel] = this.hookSeq('template-parse-ast-tag', item, rel);
       }
       if (item.children && item.children.length) {
         [item.childen, rel] = this.hookSeq('template-parse-ast', item.children, rel);
@@ -252,9 +263,16 @@ exports = module.exports = function () {
         str += '<' + item.name;
         if (item.parsedAttr) {
           Object.keys(item.parsedAttr).forEach(attr => {
-            if (attr !== 'class')
-              str += ` ${attr}="${item.parsedAttr[attr]}"`;
+            if (item.parsedAttr[attr] !== undefined && attr !== 'class' && attr !== 'style')
+              str += tools.isTrue(item.parsedAttr[attr])
+                ? ` ${attr}`
+                : ` ${attr}="${item.parsedAttr[attr]}"`;
           });
+        }
+        if (item.parsedAttr.style || (item.bindStyle && item.bindStyle.length)) {
+          let staticStyle = item.parsedAttr.style || '';
+          let bindStyle = (item.bindStyle && item.bindStyle.length) ? ` {{ ${item.bindStyle.join(' + ')} }}` : '';
+          str += ` style="${staticStyle + bindStyle}"`;
         }
         if (item.parsedAttr.class || (item.bindClass && item.bindClass.length)) {
           let staticClass = item.parsedAttr.class || '';
@@ -271,11 +289,11 @@ exports = module.exports = function () {
     return str;
   });
 
-  this.register('template-parse', function parse (html) {
+  this.register('template-parse', function parse (html, components) {
 
     return toAST(html).then((ast) => {
 
-      let rel = { handlers: []};
+      let rel = { handlers: [], components: components};
 
       [ast, rel] = this.hookSeq('template-parse-ast', ast, rel);
 
