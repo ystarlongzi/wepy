@@ -1,5 +1,5 @@
 import Event from '../class/Event';
-import { isFunc, isUndef  } from './../util/index';
+import { isFunc, isUndef, parseModel, warn } from './../util/index';
 
 const eventHandler = function (method, fn) {
   let methodKey = method.toLowerCase();
@@ -28,38 +28,72 @@ const proxyHandler = function (e) {
   let type = e.type;
   let dataset = e.currentTarget.dataset;
   let evtid = dataset.wpyEvt;
+  let modelId = dataset.modelId;
   let rel = vm.$rel || {};
   let handlers = rel.handlers ? (rel.handlers[evtid] || {}) : {};
   let fn = handlers[type];
+  let model = rel.models[modelId];
+
+  if (!fn && !model) {
+    return;
+  }
 
   let i = 0;
   let params = [];
-  while (i++ < 26) {
+  let modelParams = [];
+
+  let noParams = false;
+  let noModelParams = !model;
+  while (i++ < 26 && (!noParams || !noModelParams)) {
     let alpha = String.fromCharCode(64 + i);
-    let key = 'wpy' + type + alpha;
-    if (!dataset[key]) {
-      break;
+    if (!noParams) {
+      let key = 'wpy' + type + alpha;
+      if (!(key in dataset)) { // it can be undefined;
+        noParams = true;
+      } else {
+        params.push(dataset[key]);
+      }
     }
-    params.push(dataset[key]);
+    if (!noModelParams && model) {
+      let modelKey = 'model' + alpha;
+      if (!(modelKey in dataset)) {
+        noModelParams = true;
+      } else {
+        modelParams.push(dataset[modelKey]);
+      }
+    }
   }
 
+  if (model) {
+    if (type === model.type) {
+      if (isFunc(model.handler)) {
+        model.handler.call(vm, e.detail.value, modelParams);
+      }
+    }
+  }
 
   let $event = new Event(e);
 
   if (isFunc(fn)) {
-    return fn.apply(vm, [$event].concat(params));
-  } else {
-    throw 'Unrecognized event';
+    if (fn.name === 'proxyHandlerWithEvent') {
+      return fn.apply(vm, params.concat($event));
+    } else {
+      return fn.apply(vm, params);
+    }
+  } else if (!model) {
+    throw new Error('Unrecognized event');
   }
 }
 
 /*
- * initialize page methods
+ * initialize page methods, also the app
  */
 export function initMethods (vm, methods) {
-  Object.keys(methods).forEach(method => {
-    vm[method] = methods[method];
-  });
+  if (methods) {
+    Object.keys(methods).forEach(method => {
+      vm[method] = methods[method];
+    });
+  }
 };
 
 /*
@@ -77,18 +111,28 @@ export function initComponentMethods (comConfig, methods) {
  * patch method option
  */
 export function patchMethods (output, methods, isComponent) {
-  if (!methods) {
-    return;
-  }
 
   output.methods = {};
   let target = output.methods;
 
   target._initComponent = function (e) {
     let child = e.detail;
+    let ref = e.target.dataset.ref;
     let vm = this.$wepy;
     vm.$children.push(child);
+    if (ref) {
+      if (vm.$refs[ref]) {
+        warn(
+          'duplicate ref "' + ref +
+          '" will be covered by the last instance.\n',
+          vm
+        )
+      }
+      vm.$refs[ref] = child;
+    }
     child.$parent = vm;
+    child.$app = vm.$app;
+    child.$root = vm.$root;
     return vm;
   };
   target._proxy = proxyHandler;

@@ -25,7 +25,7 @@ const observerFn = function (output, props, prop) {
     }
 
     _props = vm._props || {};
-    _props[key] = _data;
+    // _props[key] = _data;
     vm._props = _props;
     Object.keys(_props).forEach(key => {
       proxy(vm, '_props', key);
@@ -39,6 +39,8 @@ const observerFn = function (output, props, prop) {
     });
 
     initRender(vm, Object.keys(_props));
+
+    vm[key] = _data;
   };
 };
 /*
@@ -66,7 +68,7 @@ export function patchProps (output, props) {
         newProp.type = null;
       } else if (isArr(prop.type)) {
         newProp.type = null;
-        console.warn(`Type property of props "${k}" is invalid. Array is not allowed, please specify the type.`)
+        console.warn(`In mini-app, mutiple type is not allowed. The type of "${k}" will changed to "null"`);
       } else if (AllowedTypes.indexOf(prop.type) === -1) {
         newProp.type = null;
         console.warn(`Type property of props "${k}" is invalid. Only String/Number/Boolean/Object/Array/null is allowed in weapp Component`);
